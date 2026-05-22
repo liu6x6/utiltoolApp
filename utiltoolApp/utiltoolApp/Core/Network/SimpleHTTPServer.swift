@@ -142,7 +142,7 @@ class SimpleHTTPServer {
             Upgrade: websocket\r
             Connection: Upgrade\r
             Sec-WebSocket-Accept: \(acceptKey)\r
-            \r
+            \r\n
             """
             
             let responseData = responseString.data(using: .utf8)!
@@ -196,7 +196,7 @@ class SimpleHTTPServer {
         Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r
         Access-Control-Allow-Headers: *\r
         Connection: close\r
-        \r
+        \r\n
         """
         
         var responseData = responseString.data(using: .utf8)!

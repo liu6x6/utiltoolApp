@@ -213,7 +213,7 @@ class MockAPIViewModel {
                 }
                 
                 // 精确匹配 Method 和 Path
-                if let endpoint = self.endpoints.first(where: { $0.isActive && $0.method == effectiveMethod && $0.path == path }) {
+                if let endpoint = self.endpoints.first(where: { $0.isActive && $0.method == effectiveMethod && self.isPathOK(definePath: $0.path, urlPath:path) }) {
                     var responseBody = endpoint.responseBody
                     
                     let dynamicBodyClosure: () -> String = { [weak self] in
@@ -255,5 +255,65 @@ class MockAPIViewModel {
                 isRunning = false
             }
         }
+    }
+    
+    func isPathOK(definePath: String, urlPath: String) -> Bool {
+        // 1. 如果完全相等，直接返回 true
+        if definePath == urlPath {
+            return true
+        }
+        
+        // 2. 按 "/" 拆分成组件数组并过滤掉空值
+        let defineComponents = definePath.components(separatedBy: "/").filter { !$0.isEmpty }
+        let urlComponents = urlPath.components(separatedBy: "/").filter { !$0.isEmpty }
+        
+        // 3. 逐个层级进行匹配
+        for i in 0..<defineComponents.count {
+            let defComp = defineComponents[i]
+            
+            // 规则 A: 如果遇到了 "*"，说明后面全部允许匹配
+            if defComp == "*" {
+                return urlComponents.count >= i
+            }
+            
+            // 如果 urlPath 已经没有对应层级了，说明 urlPath 太短，匹配失败
+            if i >= urlComponents.count {
+                return false
+            }
+            
+            let urlComp = urlComponents[i]
+            
+            // 规则 B: 如果是 "?"，代表任意单词，直接跳过
+            if defComp == "?" {
+                continue
+            }
+            
+            // 规则 C: 支持 "或" 操作，语法如 (recipe|article|video)
+            if defComp.hasPrefix("(") && defComp.hasSuffix(")") {
+                // 去掉前后的括号，例如: "recipe|article"
+                let start = defComp.index(defComp.startIndex, offsetBy: 1)
+                let end = defComp.index(defComp.endIndex, offsetBy: -1)
+                let innerContent = String(defComp[start..<end])
+                
+                // 按 "|" 拆分出所有的可能选项
+                let options = innerContent.components(separatedBy: "|")
+                
+                // 如果当前 url 的层级不包含在这些选项里，说明匹配失败
+                if !options.contains(urlComp) {
+                    return false
+                }
+                
+                // 包含在选项中，则这一层匹配成功，继续下一层
+                continue
+            }
+            
+            // 规则 D: 普通字符串精确匹配
+            if defComp != urlComp {
+                return false
+            }
+        }
+        
+        // 4. 长度必须一致
+        return defineComponents.count == urlComponents.count
     }
 }
