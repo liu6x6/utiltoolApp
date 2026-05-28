@@ -23,6 +23,7 @@ struct utiltoolAppApp: App {
         // 提供系统级侧边栏切换快捷键 (Cmd + S) 和菜单项
         .commands {
             SidebarCommands()
+            TextFormattingCommands()
         }
         
         // 状态栏菜单

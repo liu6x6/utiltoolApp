@@ -453,15 +453,11 @@ struct MockEndpointEditor: View {
                         .foregroundColor(.orange)
                 }
                 
-                TextEditor(text: $endpoint.responseBody)
-                    .font(.system(.body, design: .monospaced))
-                    .padding(4)
-                    .background(Color(NSColor.textBackgroundColor))
-                    .cornerRadius(6)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                    )
+                CodeTextView(
+                    text: $endpoint.responseBody,
+                    language: responseBodyLanguage,
+                    isEditable: true
+                )
             }
         }
         .padding()
@@ -526,5 +522,39 @@ struct MockEndpointEditor: View {
     
     private func shellQuoted(_ text: String) -> String {
         "'\(text.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+    
+    private var responseBodyLanguage: CodeTextLanguage? {
+        let contentType = endpoint.contentType.lowercased()
+        if contentType.contains("json") {
+            return .json
+        }
+        if contentType.contains("xml") {
+            return .xml
+        }
+        if contentType.contains("html") {
+            return .html
+        }
+        
+        if let filePath = endpoint.responseFilePath?.lowercased() {
+            if filePath.hasSuffix(".json") {
+                return .json
+            }
+            if filePath.hasSuffix(".xml") {
+                return .xml
+            }
+            if filePath.hasSuffix(".yaml") || filePath.hasSuffix(".yml") {
+                return .yaml
+            }
+            if filePath.hasSuffix(".html") {
+                return .html
+            }
+        }
+        
+        if endpoint.method == "WS" {
+            return .json
+        }
+        
+        return nil
     }
 }

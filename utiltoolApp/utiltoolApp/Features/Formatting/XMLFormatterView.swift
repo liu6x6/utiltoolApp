@@ -37,7 +37,9 @@ struct XMLFormatterView: View {
                 outputText: $viewModel.outputText,
                 layout: .horizontal,
                 inputTitle: "XML 源码",
-                outputTitle: "处理结果"
+                outputTitle: "处理结果",
+                inputLanguage: .xml,
+                outputLanguage: .xml
             )
         }
         .navigationTitle("XML 格式化")

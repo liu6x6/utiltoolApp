@@ -43,10 +43,25 @@ struct JSONToCodeView: View {
                 outputText: $viewModel.outputText,
                 layout: .horizontal,
                 inputTitle: "JSON 源码",
-                outputTitle: "生成代码"
+                outputTitle: "生成代码",
+                inputLanguage: .json,
+                outputLanguage: outputLanguage
             )
         }
         .navigationTitle("JSON 转代码")
+    }
+    
+    private var outputLanguage: CodeTextLanguage {
+        switch viewModel.language {
+        case .typescript:
+            return .typescript
+        case .swift:
+            return .swift
+        case .go:
+            return .go
+        case .python:
+            return .python
+        }
     }
 }
 
