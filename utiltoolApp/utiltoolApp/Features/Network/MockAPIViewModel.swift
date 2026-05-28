@@ -25,6 +25,40 @@ struct MockRequestLog: Identifiable, Hashable {
     var responseStatusCode: Int?
 }
 
+private enum MockConfigLoadError: LocalizedError {
+    case unsupportedFileType(String)
+    case unreadableFile(String)
+    case writeFailed
+    case invalidTopLevel
+    case missingEndpoints
+    case invalidEndpoint(Int, String)
+    case serializationFailed
+    
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedFileType(let ext):
+            return "暂不支持导入 \(ext.isEmpty ? "该类型" : ".\(ext)") 配置文件"
+        case .unreadableFile(let message):
+            return message
+        case .writeFailed:
+            return "保存配置文件失败"
+        case .invalidTopLevel:
+            return "配置文件顶层结构无效，需包含 endpoints"
+        case .missingEndpoints:
+            return "配置文件中未找到有效 endpoints"
+        case .invalidEndpoint(let index, let reason):
+            return "第 \(index) 条接口配置无效：\(reason)"
+        case .serializationFailed:
+            return "responseBody 序列化失败"
+        }
+    }
+}
+
+private struct ImportedMockConfiguration {
+    var port: String?
+    var endpoints: [MockEndpoint]
+}
+
 @Observable
 class MockAPIViewModel {
     var endpoints: [MockEndpoint] = []
@@ -33,6 +67,7 @@ class MockAPIViewModel {
     var errorMessage: String? = nil
     
     var configBaseDirectory: URL? = nil
+    var lastConfigFileURL: URL? = nil
     
     var requestLogs: [MockRequestLog] = []
     var selectedLogId: UUID? = nil
@@ -100,72 +135,28 @@ class MockAPIViewModel {
     }
     
     func loadConfig(from url: URL) {
-        guard let yamlString = try? String(contentsOf: url, encoding: .utf8) else {
+        do {
+            let imported = try parseConfig(from: url)
             DispatchQueue.main.async {
-                self.errorMessage = "读取 YAML 失败"
+                self.applyImportedConfiguration(imported, from: url)
             }
-            return
+        } catch {
+            DispatchQueue.main.async {
+                self.errorMessage = error.localizedDescription
+            }
         }
-        
-        let parsed = SimpleYAMLParser.parse(yaml: yamlString)
-        
-        DispatchQueue.main.async {
-            self.configBaseDirectory = url.deletingLastPathComponent()
+    }
+    
+    func saveConfig(to url: URL) {
+        do {
+            let data = try makeExportedConfigData()
+            try data.write(to: url, options: .atomic)
             
-            // Extract port
-            if let serverDict = parsed["server"] as? [String: Any] {
-                if let portStr = serverDict["port"] as? String {
-                    self.port = portStr
-                }
-            } else if let serverList = parsed["server"] as? [[String: Any]], let serverDict = serverList.first {
-                if let portStr = serverDict["port"] as? String {
-                    self.port = portStr
-                }
-            }
-            
-            // Extract endpoints
-            if let epsList = parsed["endpoints"] as? [[String: Any]] {
-                var newEps: [MockEndpoint] = []
-                for epDict in epsList {
-                    guard let path = epDict["path"] as? String else { continue }
-                    var ep = MockEndpoint(path: path)
-                    
-                    if let method = epDict["method"] as? String {
-                        ep.method = method.uppercased()
-                    }
-                    if let file = epDict["responseFile"] as? String {
-                        ep.responseFilePath = file
-                        // 预读取 JSON 避免沙盒权限问题，也支持实时修改（如果是完全授权目录）
-                        if let baseDir = self.configBaseDirectory {
-                            let fileURL = baseDir.appendingPathComponent(file)
-                            if let jsonStr = try? String(contentsOf: fileURL, encoding: .utf8) {
-                                ep.responseBody = jsonStr
-                            } else {
-                                ep.responseBody = "{\n  \"error\": \"Missing file: \(file)\"\n}"
-                            }
-                        }
-                    }
-                    if let codeStr = epDict["statusCode"] as? String, let code = Int(codeStr) {
-                        ep.statusCode = code
-                    }
-                    if let strategy = epDict["wsStrategy"] as? String {
-                        ep.wsStrategy = strategy
-                    }
-                    if let intervalStr = epDict["wsInterval"] as? String, let interval = Double(intervalStr) {
-                        ep.wsInterval = interval
-                    }
-                    newEps.append(ep)
-                }
-                
-                if !newEps.isEmpty {
-                    self.endpoints = newEps
-                    self.selectedEndpointId = newEps.first?.id
-                    self.save()
-                    self.errorMessage = nil
-                } else {
-                    self.errorMessage = "YAML 中未找到有效的 endpoints"
-                }
-            }
+            configBaseDirectory = url.deletingLastPathComponent()
+            lastConfigFileURL = url
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
     
@@ -315,5 +306,327 @@ class MockAPIViewModel {
         
         // 4. 长度必须一致
         return defineComponents.count == urlComponents.count
+    }
+    
+    private func applyImportedConfiguration(_ imported: ImportedMockConfiguration, from url: URL) {
+        configBaseDirectory = url.deletingLastPathComponent()
+        lastConfigFileURL = url
+        
+        if let importedPort = imported.port, !importedPort.isEmpty {
+            port = importedPort
+        }
+        
+        endpoints = imported.endpoints
+        selectedEndpointId = imported.endpoints.first?.id
+        save()
+        errorMessage = nil
+    }
+    
+    private func parseConfig(from url: URL) throws -> ImportedMockConfiguration {
+        switch url.pathExtension.lowercased() {
+        case "json":
+            return try parseJSONConfig(from: url)
+        case "yaml", "yml":
+            return try parseYAMLConfig(from: url)
+        default:
+            throw MockConfigLoadError.unsupportedFileType(url.pathExtension.lowercased())
+        }
+    }
+    
+    private func parseJSONConfig(from url: URL) throws -> ImportedMockConfiguration {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw MockConfigLoadError.unreadableFile("读取 JSON 失败")
+        }
+        
+        let rawObject: Any
+        do {
+            rawObject = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw MockConfigLoadError.unreadableFile("JSON 配置解析失败")
+        }
+        
+        guard let root = rawObject as? [String: Any] else {
+            throw MockConfigLoadError.invalidTopLevel
+        }
+        
+        let port = extractPort(from: root)
+        guard let rawEndpoints = root["endpoints"] as? [[String: Any]] else {
+            throw MockConfigLoadError.missingEndpoints
+        }
+        
+        let baseDirectory = url.deletingLastPathComponent()
+        let endpoints = try rawEndpoints.enumerated().map { offset, raw in
+            try makeEndpoint(from: raw, index: offset + 1, baseDirectory: baseDirectory)
+        }
+        
+        return ImportedMockConfiguration(port: port, endpoints: endpoints)
+    }
+    
+    private func parseYAMLConfig(from url: URL) throws -> ImportedMockConfiguration {
+        let yamlString: String
+        do {
+            yamlString = try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            throw MockConfigLoadError.unreadableFile("读取 YAML 失败")
+        }
+        
+        let parsed = SimpleYAMLParser.parse(yaml: yamlString)
+        let port = extractPort(from: parsed)
+        
+        guard let rawEndpoints = parsed["endpoints"] as? [[String: Any]] else {
+            throw MockConfigLoadError.missingEndpoints
+        }
+        
+        let baseDirectory = url.deletingLastPathComponent()
+        let endpoints = try rawEndpoints.enumerated().map { offset, raw in
+            try makeEndpoint(from: raw, index: offset + 1, baseDirectory: baseDirectory)
+        }
+        
+        return ImportedMockConfiguration(port: port, endpoints: endpoints)
+    }
+    
+    private func extractPort(from root: [String: Any]) -> String? {
+        if let serverDict = root["server"] as? [String: Any],
+           let port = stringValue(from: serverDict["port"]) {
+            return port
+        }
+        
+        if let serverList = root["server"] as? [[String: Any]],
+           let port = stringValue(from: serverList.first?["port"]) {
+            return port
+        }
+        
+        return stringValue(from: root["port"])
+    }
+    
+    private func makeEndpoint(from raw: [String: Any], index: Int, baseDirectory: URL) throws -> MockEndpoint {
+        let path = (stringValue(from: raw["path"]) ?? stringValue(from: raw["url"]) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            throw MockConfigLoadError.invalidEndpoint(index, "缺少 path/url")
+        }
+        guard path.hasPrefix("/") else {
+            throw MockConfigLoadError.invalidEndpoint(index, "path 必须以 / 开头")
+        }
+        
+        var endpoint = MockEndpoint(path: path)
+        
+        if let method = stringValue(from: raw["method"])?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !method.isEmpty {
+            endpoint.method = method.uppercased()
+        }
+        
+        if let statusCode = intValue(from: raw["statusCode"]) {
+            endpoint.statusCode = statusCode
+        }
+        
+        if let contentType = stringValue(from: raw["contentType"])?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !contentType.isEmpty {
+            endpoint.contentType = contentType
+        }
+        
+        if let isActive = boolValue(from: raw["isActive"]) {
+            endpoint.isActive = isActive
+        }
+        
+        if let wsStrategy = stringValue(from: raw["wsStrategy"])?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !wsStrategy.isEmpty {
+            endpoint.wsStrategy = wsStrategy
+        }
+        
+        if let wsInterval = doubleValue(from: raw["wsInterval"]) {
+            endpoint.wsInterval = wsInterval
+        }
+        
+        let rawResponseBody = raw["responseBody"] ?? raw["body"]
+        if let rawResponseBody {
+            endpoint.responseBody = try stringifyResponseBody(rawResponseBody, index: index)
+        }
+        
+        if let responseFile = (stringValue(from: raw["responseFile"]) ?? stringValue(from: raw["bodyFile"]))?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !responseFile.isEmpty {
+            endpoint.responseFilePath = responseFile
+            if let preloadedBody = preloadResponseBody(from: responseFile, baseDirectory: baseDirectory) {
+                endpoint.responseBody = preloadedBody
+            } else if rawResponseBody == nil {
+                endpoint.responseBody = "{\n  \"error\": \"Missing file: \(responseFile)\"\n}"
+            }
+        }
+        
+        return endpoint
+    }
+    
+    private func preloadResponseBody(from relativePath: String, baseDirectory: URL) -> String? {
+        let fileURL = baseDirectory.appendingPathComponent(relativePath)
+        guard let data = try? Data(contentsOf: fileURL),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return content
+    }
+    
+    private func makeExportedConfigData() throws -> Data {
+        let exportedPort: Any = Int(port) ?? port
+        let exportedEndpoints = try endpoints.map { try makeExportedEndpoint(from: $0) }
+        let payload: [String: Any] = [
+            "server": ["port": exportedPort],
+            "endpoints": exportedEndpoints
+        ]
+        
+        do {
+            return try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        } catch {
+            throw MockConfigLoadError.writeFailed
+        }
+    }
+    
+    private func makeExportedEndpoint(from endpoint: MockEndpoint) throws -> [String: Any] {
+        var exported: [String: Any] = [
+            "method": endpoint.method,
+            "path": endpoint.path,
+            "statusCode": endpoint.statusCode,
+            "contentType": endpoint.contentType,
+            "isActive": endpoint.isActive
+        ]
+        
+        if endpoint.method == "WS" {
+            exported["wsStrategy"] = endpoint.wsStrategy
+            exported["wsInterval"] = endpoint.wsInterval
+        }
+        
+        if let responseFilePath = endpoint.responseFilePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !responseFilePath.isEmpty {
+            exported["responseFile"] = responseFilePath
+        } else {
+            exported["responseBody"] = exportedResponseBody(from: endpoint)
+        }
+        
+        return exported
+    }
+    
+    private func exportedResponseBody(from endpoint: MockEndpoint) -> Any {
+        let trimmedBody = endpoint.responseBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBody.isEmpty else {
+            return ""
+        }
+        
+        if endpoint.contentType.lowercased().contains("json"),
+           let data = trimmedBody.data(using: .utf8),
+           let jsonObject = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            return jsonObject
+        }
+        
+        return endpoint.responseBody
+    }
+    
+    private func stringifyResponseBody(_ value: Any, index: Int) throws -> String {
+        if let string = value as? String {
+            return string
+        }
+        
+        if value is NSNull {
+            return "null"
+        }
+        
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue ? "true" : "false"
+            }
+            return number.stringValue
+        }
+        
+        guard JSONSerialization.isValidJSONObject(value) else {
+            throw MockConfigLoadError.invalidEndpoint(index, "responseBody 类型不支持")
+        }
+        
+        do {
+            let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+            guard let result = String(data: data, encoding: .utf8) else {
+                throw MockConfigLoadError.serializationFailed
+            }
+            return result
+        } catch let error as MockConfigLoadError {
+            throw error
+        } catch {
+            throw MockConfigLoadError.serializationFailed
+        }
+    }
+    
+    private func stringValue(from value: Any?) -> String? {
+        switch value {
+        case let string as String:
+            return string
+        case let int as Int:
+            return String(int)
+        case let double as Double:
+            return String(double)
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue ? "true" : "false"
+            }
+            return number.stringValue
+        default:
+            return nil
+        }
+    }
+    
+    private func intValue(from value: Any?) -> Int? {
+        switch value {
+        case let int as Int:
+            return int
+        case let string as String:
+            return Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return nil
+            }
+            return number.intValue
+        default:
+            return nil
+        }
+    }
+    
+    private func doubleValue(from value: Any?) -> Double? {
+        switch value {
+        case let double as Double:
+            return double
+        case let int as Int:
+            return Double(int)
+        case let string as String:
+            return Double(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return nil
+            }
+            return number.doubleValue
+        default:
+            return nil
+        }
+    }
+    
+    private func boolValue(from value: Any?) -> Bool? {
+        switch value {
+        case let bool as Bool:
+            return bool
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue
+            }
+            return nil
+        case let string as String:
+            switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes", "y":
+                return true
+            case "false", "0", "no", "n":
+                return false
+            default:
+                return nil
+            }
+        default:
+            return nil
+        }
     }
 }
