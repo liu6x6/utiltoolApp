@@ -43,7 +43,7 @@ enum ToolItem: String, CaseIterable, Identifiable {
             
         case .jsonFormat: return "curlybraces"
         case .xmlFormat: return "chevron.left.forwardslash.chevron.right"
-        case .jsonToCode: return "chevron.left.forwardslash.chevron.right.square"
+        case .jsonToCode: return "chevron.left.chevron.right"
         case .jsonConvert: return "arrow.triangle.2.circlepath.doc.on.clipboard"
             
         case .timestamp: return "clock.arrow.circlepath"
