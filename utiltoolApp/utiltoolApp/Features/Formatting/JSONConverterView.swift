@@ -40,10 +40,21 @@ struct JSONConverterView: View {
                 outputText: $viewModel.outputText,
                 layout: .horizontal,
                 inputTitle: "JSON 源码",
-                outputTitle: viewModel.targetFormat.rawValue
+                outputTitle: viewModel.targetFormat.rawValue,
+                inputLanguage: .json,
+                outputLanguage: outputLanguage
             )
         }
         .navigationTitle("JSON 数据转换")
+    }
+    
+    private var outputLanguage: CodeTextLanguage? {
+        switch viewModel.targetFormat {
+        case .yaml:
+            return .yaml
+        case .csv:
+            return .csv
+        }
     }
 }
 

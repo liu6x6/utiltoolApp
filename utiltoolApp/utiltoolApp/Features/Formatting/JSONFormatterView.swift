@@ -40,7 +40,9 @@ struct JSONFormatterView: View {
                 outputText: $viewModel.outputText,
                 layout: .horizontal,
                 inputTitle: "JSON 源码",
-                outputTitle: "处理结果"
+                outputTitle: "处理结果",
+                inputLanguage: .json,
+                outputLanguage: .json
             )
         }
         .navigationTitle("JSON 格式化")

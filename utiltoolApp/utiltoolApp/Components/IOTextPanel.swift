@@ -21,6 +21,8 @@ struct IOTextPanel: View {
     var inputTitle: String = "输入"
     var outputTitle: String = "输出"
     var isOutputReadOnly: Bool = true
+    var inputLanguage: CodeTextLanguage? = nil
+    var outputLanguage: CodeTextLanguage? = nil
     
     init(inputText: Binding<String>,
             outputText: Binding<String>,
@@ -79,15 +81,11 @@ struct IOTextPanel: View {
                 .foregroundColor(.red)
             }
             
-            TextEditor(text: $inputText)
-                .font(.system(.body, design: .monospaced))
-                .padding(4)
-                .background(Color(NSColor.textBackgroundColor))
-                .cornerRadius(6)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                )
+            CodeTextView(
+                text: $inputText,
+                language: inputLanguage,
+                isEditable: true
+            )
         }
     }
     
@@ -104,17 +102,13 @@ struct IOTextPanel: View {
                 .foregroundColor(.accentColor)
             }
             
-            TextEditor(text: .init(
-                get: { outputText },
-                set: { if !isOutputReadOnly { outputText = $0 } }
-            ))
-            .font(.system(.body, design: .monospaced))
-            .padding(4)
-            .background(Color(NSColor.textBackgroundColor))
-            .cornerRadius(6)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+            CodeTextView(
+                text: .init(
+                    get: { outputText },
+                    set: { if !isOutputReadOnly { outputText = $0 } }
+                ),
+                language: outputLanguage,
+                isEditable: !isOutputReadOnly
             )
             if let _ = outputHexText {
                 HStack {
@@ -166,7 +160,9 @@ struct IOTextPanel: View {
         outputHexText: .constant("{\n  \"hex name\": \"test\"\n}"),
         layout: .horizontal,
         inputTitle: "JSON 源码",
-        outputTitle: "格式化结果"
+        outputTitle: "格式化结果",
+        inputLanguage: .json,
+        outputLanguage: .json
     )
     .frame(width: 800, height: 400)
 }
