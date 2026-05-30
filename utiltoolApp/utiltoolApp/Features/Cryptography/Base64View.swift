@@ -40,6 +40,7 @@ struct BaseEncodeView: View {
             IOTextPanel(
                 inputText: $viewModel.inputText,
                 outputText: $viewModel.outputText,
+                outputHexText: $viewModel.outputHexText,
                 layout: .horizontal,
                 inputTitle: viewModel.mode == .encode ? "明文" : "\(viewModel.baseType.rawValue) 密文",
                 outputTitle: viewModel.mode == .encode ? "\(viewModel.baseType.rawValue) 密文" : "明文"

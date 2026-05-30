@@ -14,12 +14,29 @@ struct IOTextPanel: View {
     // 状态绑定
     @Binding var inputText: String
     @Binding var outputText: String
+    @Binding var outputHexText: String?
     
     // 配置项
     var layout: LayoutMode = .horizontal
     var inputTitle: String = "输入"
     var outputTitle: String = "输出"
     var isOutputReadOnly: Bool = true
+    
+    init(inputText: Binding<String>,
+            outputText: Binding<String>,
+            outputHexText: Binding<String?>? = nil,
+            layout: LayoutMode = .horizontal,
+            inputTitle: String = "输入",
+            outputTitle: String = "输出",
+            isOutputReadOnly: Bool = true) {
+           self._inputText = inputText
+           self._outputText = outputText
+           self._outputHexText = outputHexText ?? .constant(nil)
+           self.layout = layout
+           self.inputTitle = inputTitle
+           self.outputTitle = outputTitle
+           self.isOutputReadOnly = isOutputReadOnly
+       }
     
     var body: some View {
         Group {
@@ -99,6 +116,30 @@ struct IOTextPanel: View {
                 RoundedRectangle(cornerRadius: 6)
                     .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
             )
+            if let _ = outputHexText {
+                HStack {
+                    Text("Hex")
+                        .font(.headline)
+                    Spacer()
+                    Button(action: { copyToClipboard(text: outputHexText ?? "") }) {
+                        Label("复制", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.accentColor)
+                }
+                TextEditor(text: .init(
+                    get: { outputHexText ?? "" },
+                    set: { if !isOutputReadOnly { outputHexText = $0 } }
+                ))
+                .font(.system(.body, design: .monospaced))
+                .padding(4)
+                .background(Color(NSColor.textBackgroundColor))
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                )
+            }
         }
     }
     
@@ -122,6 +163,7 @@ struct IOTextPanel: View {
     IOTextPanel(
         inputText: .constant("{\"name\":\"test\"}"),
         outputText: .constant("{\n  \"name\": \"test\"\n}"),
+        outputHexText: .constant("{\n  \"hex name\": \"test\"\n}"),
         layout: .horizontal,
         inputTitle: "JSON 源码",
         outputTitle: "格式化结果"
