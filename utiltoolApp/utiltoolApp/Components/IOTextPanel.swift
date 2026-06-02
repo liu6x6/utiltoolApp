@@ -25,20 +25,24 @@ struct IOTextPanel: View {
     var outputLanguage: CodeTextLanguage? = nil
     
     init(inputText: Binding<String>,
-            outputText: Binding<String>,
-            outputHexText: Binding<String?>? = nil,
-            layout: LayoutMode = .horizontal,
-            inputTitle: String = "输入",
-            outputTitle: String = "输出",
-            isOutputReadOnly: Bool = true) {
-           self._inputText = inputText
-           self._outputText = outputText
-           self._outputHexText = outputHexText ?? .constant(nil)
-           self.layout = layout
-           self.inputTitle = inputTitle
-           self.outputTitle = outputTitle
-           self.isOutputReadOnly = isOutputReadOnly
-       }
+         outputText: Binding<String>,
+         outputHexText: Binding<String?>? = nil,
+         layout: LayoutMode = .horizontal,
+         inputTitle: String = "输入",
+         outputTitle: String = "输出",
+         inputLanguage: CodeTextLanguage? = nil,
+         outputLanguage: CodeTextLanguage? = nil,
+         isOutputReadOnly: Bool = true) {
+        self._inputText = inputText
+        self._outputText = outputText
+        self._outputHexText = outputHexText ?? .constant(nil)
+        self.layout = layout
+        self.inputTitle = inputTitle
+        self.outputTitle = outputTitle
+        self.isOutputReadOnly = isOutputReadOnly
+        self.inputLanguage = inputLanguage
+        self.outputLanguage = outputLanguage
+    }
     
     var body: some View {
         Group {
