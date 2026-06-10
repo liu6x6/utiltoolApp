@@ -61,6 +61,12 @@ private struct ImportedMockConfiguration {
 
 @Observable
 class MockAPIViewModel {
+    private enum StorageKey {
+        static let endpoints = "MockEndpointsData"
+        static let port = "MockEndpointsPort"
+        static let configFilePath = "MockConfigFilePath"
+    }
+    
     var endpoints: [MockEndpoint] = []
     var isRunning: Bool = false
     var port: String = "8080"
@@ -75,7 +81,7 @@ class MockAPIViewModel {
     var selectedEndpointId: UUID? = nil {
         didSet {
             if let selected = endpoints.first(where: { $0.id == selectedEndpointId }) {
-                editingEndpoint = selected
+                editingEndpoint = refreshedEndpointFromFileIfAvailable(selected)
             } else {
                 editingEndpoint = nil
             }
@@ -98,15 +104,22 @@ class MockAPIViewModel {
     let availableContentTypes = ["application/json", "text/plain", "text/html", "application/xml"]
     
     init() {
-        if let data = UserDefaults.standard.data(forKey: "MockEndpointsData"),
+        if let data = UserDefaults.standard.data(forKey: StorageKey.endpoints),
            let decoded = try? JSONDecoder().decode([MockEndpoint].self, from: data) {
             endpoints = decoded
         } else {
             endpoints = [MockEndpoint()]
         }
         
-        if let savedPort = UserDefaults.standard.string(forKey: "MockEndpointsPort") {
+        if let savedPort = UserDefaults.standard.string(forKey: StorageKey.port) {
             port = savedPort
+        }
+        
+        if let savedConfigFilePath = UserDefaults.standard.string(forKey: StorageKey.configFilePath),
+           !savedConfigFilePath.isEmpty {
+            let configURL = URL(fileURLWithPath: savedConfigFilePath)
+            lastConfigFileURL = configURL
+            configBaseDirectory = configURL.deletingLastPathComponent()
         }
         
         selectedEndpointId = endpoints.first?.id
@@ -114,9 +127,14 @@ class MockAPIViewModel {
     
     func save() {
         if let encoded = try? JSONEncoder().encode(endpoints) {
-            UserDefaults.standard.set(encoded, forKey: "MockEndpointsData")
+            UserDefaults.standard.set(encoded, forKey: StorageKey.endpoints)
         }
-        UserDefaults.standard.set(port, forKey: "MockEndpointsPort")
+        UserDefaults.standard.set(port, forKey: StorageKey.port)
+        if let lastConfigFileURL {
+            UserDefaults.standard.set(lastConfigFileURL.path, forKey: StorageKey.configFilePath)
+        } else {
+            UserDefaults.standard.removeObject(forKey: StorageKey.configFilePath)
+        }
     }
     
     func addEndpoint() {
@@ -165,6 +183,32 @@ class MockAPIViewModel {
         selectedLogId = nil
     }
     
+    func refreshedEndpointFromFileIfAvailable(_ endpoint: MockEndpoint) -> MockEndpoint {
+        guard let fileBody = responseBodyFromConfiguredFile(for: endpoint) else {
+            return endpoint
+        }
+        
+        var refreshedEndpoint = endpoint
+        refreshedEndpoint.responseBody = fileBody
+        return refreshedEndpoint
+    }
+    
+    func persistResponseBodyToFileIfAvailable(for endpoint: MockEndpoint, body: String) {
+        guard let fileURL = existingResponseFileURL(for: endpoint) else {
+            return
+        }
+        
+        do {
+            try body.write(to: fileURL, atomically: true, encoding: .utf8)
+        } catch {
+            errorMessage = "写入响应数据文件失败: \(fileURL.lastPathComponent)"
+        }
+    }
+    
+    func hasExistingResponseFile(for endpoint: MockEndpoint) -> Bool {
+        existingResponseFileURL(for: endpoint) != nil
+    }
+    
     private func appendLog(_ log: MockRequestLog, statusCode: Int) {
         var newLog = log
         newLog.responseStatusCode = statusCode
@@ -189,13 +233,13 @@ class MockAPIViewModel {
             }
             
             server = SimpleHTTPServer()
-            server?.requestHandler = { [weak self] method, path, headers, body in
+            server?.requestHandler = { [weak self] method, requestTarget, headers, body in
                 guard let self = self else { return (500, "Internal Server Error", "text/plain", nil) }
                 
                 let isWSRequest = headers.contains(where: { $0.key.lowercased() == "upgrade" && $0.value.lowercased() == "websocket" })
                 let effectiveMethod = isWSRequest ? "WS" : method
                 
-                let log = MockRequestLog(method: effectiveMethod, path: path, headers: headers, body: body, timestamp: Date())
+                let log = MockRequestLog(method: effectiveMethod, path: requestTarget, headers: headers, body: body, timestamp: Date())
                 
                 // 处理 CORS 预检请求 (OPTIONS)
                 if method == "OPTIONS" {
@@ -204,18 +248,20 @@ class MockAPIViewModel {
                 }
                 
                 // 精确匹配 Method 和 Path
-                if let endpoint = self.endpoints.first(where: { $0.isActive && $0.method == effectiveMethod && self.isPathOK(definePath: $0.path, urlPath:path) }) {
+                if let endpoint = self.endpoints.first(where: {
+                    $0.isActive
+                    && $0.method == effectiveMethod
+                    && self.isPathOK(
+                        definePath: $0.path,
+                        requestTarget: requestTarget,
+                        headers: headers,
+                        isWebSocket: isWSRequest
+                    )
+                }) {
                     var responseBody = endpoint.responseBody
                     
                     let dynamicBodyClosure: () -> String = { [weak self] in
-                        var currentBody = endpoint.responseBody
-                        if let file = endpoint.responseFilePath, let baseDir = self?.configBaseDirectory {
-                            let fileURL = baseDir.appendingPathComponent(file)
-                            if let liveData = try? Data(contentsOf: fileURL), let liveString = String(data: liveData, encoding: .utf8) {
-                                currentBody = liveString
-                            }
-                        }
-                        return currentBody
+                        self?.responseBodyFromConfiguredFile(for: endpoint) ?? endpoint.responseBody
                     }
                     
                     responseBody = dynamicBodyClosure()
@@ -248,15 +294,57 @@ class MockAPIViewModel {
         }
     }
     
-    func isPathOK(definePath: String, urlPath: String) -> Bool {
+    func isPathOK(
+        definePath: String,
+        requestTarget: String,
+        headers: [String: String] = [:],
+        isWebSocket: Bool = false
+    ) -> Bool {
+        let normalizedDefinePath = definePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedRequestTarget = requestTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        guard !normalizedDefinePath.isEmpty, !normalizedRequestTarget.isEmpty else {
+            return false
+        }
+        
+        let hasExplicitQueryRule = queryDelimiterIndex(in: normalizedDefinePath) != nil
+        let shouldTryRequestTargetMatching = hasExplicitQueryRule || isAbsoluteURLPattern(normalizedDefinePath)
+        
+        if shouldTryRequestTargetMatching {
+            let patternCandidates = requestTargetMatchCandidates(
+                for: normalizedDefinePath,
+                headers: [:],
+                isWebSocket: isWebSocket
+            )
+            let requestCandidates = requestTargetMatchCandidates(
+                for: normalizedRequestTarget,
+                headers: headers,
+                isWebSocket: isWebSocket
+            )
+            
+            for patternCandidate in patternCandidates {
+                if patternCandidate == definePath {
+                    return true
+                }
+                for requestCandidate in requestCandidates where matchesRequestTarget(pattern: patternCandidate, requestTarget: requestCandidate) {
+                    return true
+                }
+            }
+            
+          
+        }
+        
+        let definePathOnly = pathOnlyForMatching(from: normalizedDefinePath)
+        let requestPathOnly = pathOnlyForMatching(from: normalizedRequestTarget)
+        
         // 1. 如果完全相等，直接返回 true
-        if definePath == urlPath {
+        if definePathOnly == requestPathOnly {
             return true
         }
         
         // 2. 按 "/" 拆分成组件数组并过滤掉空值
-        let defineComponents = definePath.components(separatedBy: "/").filter { !$0.isEmpty }
-        let urlComponents = urlPath.components(separatedBy: "/").filter { !$0.isEmpty }
+        let defineComponents = definePathOnly.components(separatedBy: "/").filter { !$0.isEmpty }
+        let urlComponents = requestPathOnly.components(separatedBy: "/").filter { !$0.isEmpty }
         
         // 3. 逐个层级进行匹配
         for i in 0..<defineComponents.count {
@@ -306,6 +394,123 @@ class MockAPIViewModel {
         
         // 4. 长度必须一致
         return defineComponents.count == urlComponents.count
+    }
+    
+    private func isAbsoluteURLPattern(_ value: String) -> Bool {
+        let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalizedValue.hasPrefix("http://")
+            || normalizedValue.hasPrefix("https://")
+            || normalizedValue.hasPrefix("ws://")
+            || normalizedValue.hasPrefix("wss://")
+    }
+    
+    private func queryDelimiterIndex(in value: String) -> String.Index? {
+        guard let questionMarkIndex = value.firstIndex(of: "?"), questionMarkIndex > value.startIndex else {
+            return nil
+        }
+        
+        let previousIndex = value.index(before: questionMarkIndex)
+        return value[previousIndex] == "/" ? nil : questionMarkIndex
+    }
+    
+    private func requestTargetMatchCandidates(
+        for value: String,
+        headers: [String: String],
+        isWebSocket: Bool
+    ) -> [String] {
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedValue.isEmpty else { return [] }
+        
+        var candidates: [String] = [trimmedValue]
+        
+        if let pathWithQuery = pathWithQueryForMatching(from: trimmedValue), pathWithQuery != trimmedValue {
+            candidates.append(pathWithQuery)
+        }
+        
+        if !isAbsoluteURLPattern(trimmedValue), let host = normalizedHost(from: headers) {
+            let schemes = isWebSocket ? ["ws", "wss"] : ["http", "https"]
+            for scheme in schemes {
+                candidates.append("\(scheme)://\(host)\(trimmedValue)")
+            }
+        }
+        
+        return uniqueNonEmptyStrings(candidates)
+    }
+    
+    private func pathWithQueryForMatching(from value: String) -> String? {
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedValue.isEmpty else { return nil }
+        
+        if isAbsoluteURLPattern(trimmedValue),
+           let components = URLComponents(string: trimmedValue) {
+            let path = components.path.isEmpty ? "/" : components.path
+            if let query = components.percentEncodedQuery, !query.isEmpty {
+                return "\(path)?\(query)"
+            }
+            if queryDelimiterIndex(in: trimmedValue) != nil {
+                return "\(path)?"
+            }
+            return path
+        }
+        
+        return trimmedValue
+    }
+    
+    private func pathOnlyForMatching(from value: String) -> String {
+        let candidate = pathWithQueryForMatching(from: value) ?? value
+        return candidate.components(separatedBy: "?").first ?? candidate
+    }
+    
+    private func normalizedHost(from headers: [String: String]) -> String? {
+        headers.first(where: { $0.key.caseInsensitiveCompare("Host") == .orderedSame })?
+            .value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    private func matchesRequestTarget(pattern: String, requestTarget: String) -> Bool {
+        if pattern == requestTarget {
+            return true
+        }
+        
+        if let prefix = requestTargetPrefixPattern(from: pattern) {
+            return requestTarget.hasPrefix(prefix)
+        }
+        
+        return false
+    }
+    
+    private func requestTargetPrefixPattern(from pattern: String) -> String? {
+        guard !pattern.isEmpty else { return nil }
+        
+        if pattern.hasSuffix("*") {
+            return String(pattern.dropLast())
+        }
+        
+        if pattern.hasSuffix("&") {
+            return pattern
+        }
+        
+        guard pattern.hasSuffix("?"), pattern.count > 1 else {
+            return nil
+        }
+        
+        let previousIndex = pattern.index(before: pattern.endIndex)
+        let beforeQuestionMark = pattern.index(before: previousIndex)
+        return pattern[beforeQuestionMark] == "/" ? nil : pattern
+    }
+    
+    private func uniqueNonEmptyStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        
+        for value in values {
+            guard !value.isEmpty, seen.insert(value).inserted else {
+                continue
+            }
+            result.append(value)
+        }
+        
+        return result
     }
     
     private func applyImportedConfiguration(_ imported: ImportedMockConfiguration, from url: URL) {
@@ -407,8 +612,8 @@ class MockAPIViewModel {
         guard !path.isEmpty else {
             throw MockConfigLoadError.invalidEndpoint(index, "缺少 path/url")
         }
-        guard path.hasPrefix("/") else {
-            throw MockConfigLoadError.invalidEndpoint(index, "path 必须以 / 开头")
+        guard path.hasPrefix("/") || isAbsoluteURLPattern(path) else {
+            throw MockConfigLoadError.invalidEndpoint(index, "path 必须以 / 开头，或使用完整的 http/https/ws/wss URL")
         }
         
         var endpoint = MockEndpoint(path: path)
@@ -466,6 +671,37 @@ class MockAPIViewModel {
             return nil
         }
         return content
+    }
+    
+    private func responseBodyFromConfiguredFile(for endpoint: MockEndpoint) -> String? {
+        guard let fileURL = existingResponseFileURL(for: endpoint) else {
+            return nil
+        }
+        
+        guard let data = try? Data(contentsOf: fileURL),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        
+        return content
+    }
+    
+    private func existingResponseFileURL(for endpoint: MockEndpoint) -> URL? {
+        guard let trimmedPath = endpoint.responseFilePath?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !trimmedPath.isEmpty,
+            let baseDirectory = configBaseDirectory else {
+            return nil
+        }
+        
+        let fileURL = baseDirectory.appendingPathComponent(trimmedPath)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            return nil
+        }
+        
+        return fileURL
     }
     
     private func makeExportedConfigData() throws -> Data {

@@ -191,10 +191,14 @@ struct MockServerWorkspaceView: View {
         }
         
         return Binding(
-            get: { viewModel.endpoints[selectedIndex] },
+            get: {
+                if let editing = viewModel.editingEndpoint, editing.id == selectedId {
+                    return editing
+                }
+                return viewModel.endpoints[selectedIndex]
+            },
             set: { updated in
-                viewModel.endpoints[selectedIndex] = updated
-                viewModel.save()
+                viewModel.editingEndpoint = updated
             }
         )
     }
@@ -316,10 +320,14 @@ private struct MockEndpointListRow: View {
 }
 
 struct MockEndpointEditor: View {
+    @Environment(MockAPIViewModel.self) private var viewModel
+    
     @Binding var endpoint: MockEndpoint
     var isServerRunning: Bool
     var port: String
     var onClose: () -> Void
+    
+    @State private var responseBodyDraft: String = ""
     
     let availableMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "WS"]
     let availableContentTypes = ["application/json", "text/plain", "text/html", "application/xml"]
@@ -381,8 +389,8 @@ struct MockEndpointEditor: View {
                 }
                 
                 VStack(alignment: .leading) {
-                    Text("Path (必须以 / 开头)").font(.caption).foregroundColor(.secondary)
-                    TextField("/api/user", text: $endpoint.path)
+                    Text("Path / URL (支持 /path 或完整 URL)").font(.caption).foregroundColor(.secondary)
+                    TextField("/api/user 或 https://example.com/api/user?", text: $endpoint.path)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
                 }
@@ -447,26 +455,48 @@ struct MockEndpointEditor: View {
                 Text(endpoint.method == "WS" ? "推送内容 (Message Body)" : "响应体 (Response Body)")
                     .font(.headline)
                 
-                if endpoint.responseFilePath != nil {
-                    Text("💡 当前已配置了外部响应数据文件，这里显示的可能是默认文本或预加载内容，实际请求会尝试热读取文件内容。")
+                if let responseFileMessage {
+                    Text(responseFileMessage)
                         .font(.caption)
                         .foregroundColor(.orange)
                 }
                 
                 CodeTextView(
-                    text: $endpoint.responseBody,
+                    text: responseBodyBinding,
                     language: responseBodyLanguage,
                     isEditable: true
                 )
+                .id(endpoint.id)
             }
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear {
+            reloadResponseBodyFromFileIfNeeded()
+            syncResponseBodyDraft()
+        }
+        .onChange(of: endpoint.id) { _, _ in
+            reloadResponseBodyFromFileIfNeeded()
+            syncResponseBodyDraft()
+        }
+        .onChange(of: endpoint.responseFilePath) { _, _ in
+            reloadResponseBodyFromFileIfNeeded()
+            syncResponseBodyDraft()
+        }
+        .onChange(of: endpoint.responseBody) { _, newValue in
+            guard newValue != responseBodyDraft else { return }
+            responseBodyDraft = newValue
+        }
     }
     
     private var previewURLString: String? {
+        let trimmedPath = endpoint.path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isAbsoluteURLPattern(trimmedPath) {
+            return trimmedPath
+        }
+        
         let proto = endpoint.method == "WS" ? "ws" : "http"
-        let resolvedPath = resolvedPreviewPath(from: endpoint.path)
+        let resolvedPath = resolvedPreviewPath(from: trimmedPath)
         return "\(proto)://127.0.0.1:\(port)\(resolvedPath)"
     }
     
@@ -522,6 +552,51 @@ struct MockEndpointEditor: View {
     
     private func shellQuoted(_ text: String) -> String {
         "'\(text.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+    
+    private func isAbsoluteURLPattern(_ value: String) -> Bool {
+        let normalizedValue = value.lowercased()
+        return normalizedValue.hasPrefix("http://")
+            || normalizedValue.hasPrefix("https://")
+            || normalizedValue.hasPrefix("ws://")
+            || normalizedValue.hasPrefix("wss://")
+    }
+    
+    private var responseBodyBinding: Binding<String> {
+        Binding(
+            get: { responseBodyDraft },
+            set: { newValue in
+                responseBodyDraft = newValue
+                if endpoint.responseBody != newValue {
+                    endpoint.responseBody = newValue
+                    viewModel.persistResponseBodyToFileIfAvailable(for: endpoint, body: newValue)
+                }
+            }
+        )
+    }
+    
+    private func syncResponseBodyDraft() {
+        responseBodyDraft = endpoint.responseBody
+    }
+    
+    private func reloadResponseBodyFromFileIfNeeded() {
+        let refreshedEndpoint = viewModel.refreshedEndpointFromFileIfAvailable(endpoint)
+        guard refreshedEndpoint != endpoint else { return }
+        endpoint = refreshedEndpoint
+    }
+    
+    private var responseFileMessage: String? {
+        guard let responseFilePath = endpoint.responseFilePath?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !responseFilePath.isEmpty else {
+            return nil
+        }
+        
+        if viewModel.hasExistingResponseFile(for: endpoint) {
+            return "💡 当前已加载外部响应数据文件：\(responseFilePath)，编辑内容会同步写回该文件。"
+        }
+        
+        return "💡 已配置响应数据文件：\(responseFilePath)，但当前未找到对应文件；现在的修改只会暂时保存在工作区。"
     }
     
     private var responseBodyLanguage: CodeTextLanguage? {

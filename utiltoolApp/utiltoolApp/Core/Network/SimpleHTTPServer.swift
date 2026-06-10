@@ -15,7 +15,7 @@ class SimpleHTTPServer {
     private var connections: [NWConnection] = []
     private var wsTimers: [ObjectIdentifier: DispatchSourceTimer] = [:]
     
-    // 路由处理器: (请求方法, 请求路径, Headers, Body) -> (状态码, 响应体, Content-Type, WSOptions?)
+    // 路由处理器: (请求方法, 原始请求目标(保留 query/可能是完整 URL), Headers, Body) -> (状态码, 响应体, Content-Type, WSOptions?)
     var requestHandler: ((String, String, [String: String], String) -> (Int, String, String, WSOptions?))?
     
     func start(port: UInt16) throws {
@@ -97,10 +97,7 @@ class SimpleHTTPServer {
         }
         
         let method = parts[0]
-        let rawPath = parts[1]
-        
-        // 分离 URL 路径和 Query 参数
-        let path = rawPath.components(separatedBy: "?").first ?? rawPath
+        let requestTarget = parts[1]
         
         // 解析 Headers
         var headers: [String: String] = [:]
@@ -124,7 +121,7 @@ class SimpleHTTPServer {
         var wsOptions: WSOptions? = nil
         
         if let handler = requestHandler {
-            let result = handler(method, path, headers, bodyString)
+            let result = handler(method, requestTarget, headers, bodyString)
             statusCode = result.0
             responseBody = result.1
             contentType = result.2
